@@ -1,0 +1,853 @@
+---
+title: "Project - Missing Data"
+author: "Nerurkar Jui A"
+date: "3/14/2020"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+set.seed(123)
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(reshape2)
+library(glmnet)
+library(caret)
+library(tidyverse)
+library(mvnmle)
+library(VIM)
+library(mice)
+```
+
+Introduction:
+
+Ames Data - only using the train.csv dataset which has 1460 observations.
+
+```{r}
+set.seed(123)
+data = read.csv("Dataset for Project/house-prices-advanced-regression-techniques/train.csv")
+data = data[,-1]
+
+```
+
+```{r}
+sum(is.na(data))
+#Find columns with missing data
+missing <- colnames(data)[colSums(is.na(data)) > 0]
+
+for(i in 1:length(missing)){
+  print(paste0(missing[i]," ", "-", " ",(sum(is.na(data[,missing[i]]))/nrow(data))))
+}
+
+#Alley, PoolQC, Fence and MiscFeature have more than 80% missingness. Hence, deleting those columns from the data
+
+data = data %>% select(- c(Alley, PoolQC, Fence, MiscFeature))
+```
+
+```{r}
+#Some basic analysis about the variable to be predicted: Sale Price
+ggplot(data=data[!is.na(data$SalePrice),], aes(x=SalePrice)) +
+  geom_histogram(fill="blue", binwidth = 10000) +
+  scale_x_continuous(breaks= seq(0, 800000, by=100000), labels = comma)
+
+data$LogSale = log(data$SalePrice)
+hist(data$SalePrice)
+hist(data$LogSale)
+```
+
+Feature Selection:
+
+```{r}
+temp.data = data %>% select(-SalePrice)
+num_col = vector()
+for(i in 1:ncol(temp.data)){if (is.numeric(temp.data[,i]) == T) {num_col = c(num_col, i)}}
+#Check for correlations between Sale Price and other numerical variables
+cor.data = temp.data[, num_col]
+cormat <- round(cor(cor.data),2)
+melted_cormat <- melt(cormat)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+cormat = as.data.frame(cormat)
+cormat = cormat[cormat$LogSale > 0.6, ]
+cormat = cormat[-c(1,2,5),]
+rownames(cormat)
+```
+
+GarageCars - GarageArea are strongly correlated. Hence, I am going to include only TotalBsmtSF, GrLivArea and GarageCars, based on their correlations with the outcome of interest, Sale Price.
+In addition to these, I am also going to include LotFrontage and LotArea in my data for the purpose of conducting missing data analysis.
+
+```{r}
+final.data = data[,-num_col]
+final.data$TotalBsmtSF = data$TotalBsmtSF
+final.data$GarageCars = data$GarageCars
+final.data$LotArea = data$LotArea
+final.data$LotFrontage = data$LotFrontage
+final.data$LogSale = data$LogSale
+#comp.data = final.data[complete.cases(final.data),]
+#miss.data = final.data[!complete.cases(final.data),]
+#final.data = rbind(comp.data[sample(nrow(comp.data), 135, replace = F),], miss.data[sample(nrow(miss.data), 15, replace = F),])
+#write.csv(final.data, "housing_final.csv")
+```
+
+```{r}
+#final.data = read.csv("housing_final.csv")
+sum(is.na(final.data))/nrow(final.data)
+str(final.data)
+#Delete columns with less than 2 levels
+final.data = final.data %>% select(-c(Street, Utilities))
+
+missing <- colnames(final.data)[colSums(is.na(final.data)) > 0]
+str(final.data[,missing])
+```
+
+1) Complete case analysis/ Listwise deletion
+```{r}
+complete.data = final.data[complete.cases(final.data),]
+```
+
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (complete.data), floor(0.80 * nrow(complete.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- complete.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- complete.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+complete.case.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+complete.case.RMSE
+```
+
+2) Mean/mode imputation
+
+```{r}
+mean.imp.data = final.data
+
+#Mean imputation function
+mean.imp <- function (a)
+{
+  missing <- is.na(a)
+  a.obs <- a[!missing]
+  imputed <- a
+  imputed[missing] <- mean(a.obs)
+  # Output the imputed vector
+  return (imputed)
+}
+
+#Mode imputation function
+mode = function(x)
+{
+  ta = table(x)
+  tam = max(ta)
+  if (all(ta == tam))
+    mod = NA 
+  else
+    mod = names(ta)[ta == tam] 
+  return(mod)
+}
+
+mode.imp <- function(a)
+{
+  missing <- is.na(a)
+  a.obs <- a[!missing]
+  imputed <- a
+  imputed[missing] <- mode(a.obs) 
+  # Output the imputed vector 
+  return (imputed)
+}
+
+
+```
+
+
+```{r}
+mean.imp.data$MasVnrType = mode.imp(mean.imp.data$MasVnrType)
+mean.imp.data$BsmtQual = mode.imp(mean.imp.data$BsmtQual)
+mean.imp.data$BsmtCond = mode.imp(mean.imp.data$BsmtCond)
+mean.imp.data$BsmtExposure = mode.imp(mean.imp.data$BsmtExposure)
+mean.imp.data$BsmtFinType1 = mode.imp(mean.imp.data$BsmtFinType1)
+mean.imp.data$BsmtFinType2 = mode.imp(mean.imp.data$BsmtFinType2)
+mean.imp.data$FireplaceQu = mode.imp(mean.imp.data$FireplaceQu)
+mean.imp.data$GarageType = mode.imp(mean.imp.data$GarageType)
+mean.imp.data$GarageFinish = mode.imp(mean.imp.data$GarageFinish)
+mean.imp.data$GarageQual = mode.imp(mean.imp.data$GarageQual)
+mean.imp.data$GarageCond = mode.imp(mean.imp.data$GarageCond)
+mean.imp.data$LotFrontage = mean.imp(mean.imp.data$LotFrontage)
+mean.imp.data$Electrical = mode.imp(mean.imp.data$Electrical)
+
+sum(is.na(mean.imp.data))
+```
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (mean.imp.data), floor(0.80 * nrow(mean.imp.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- mean.imp.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- mean.imp.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+mean.imp.case.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+mean.imp.case.RMSE
+```
+
+3) Random imputation
+
+```{r}
+ran.imp.data = final.data
+
+random.imp <- function (a)
+{
+  missing <- is.na(a)
+  n.missing <- sum(missing)
+  a.obs <- a[!missing]
+  imputed <- a
+  imputed[missing] <- sample (a.obs, n.missing, replace=TRUE)
+  return (imputed)
+}
+```
+
+```{r}
+ran.imp.data$MasVnrType = random.imp(ran.imp.data$MasVnrType)
+ran.imp.data$BsmtQual = random.imp(ran.imp.data$BsmtQual)
+ran.imp.data$BsmtCond = random.imp(ran.imp.data$BsmtCond)
+ran.imp.data$BsmtExposure = random.imp(ran.imp.data$BsmtExposure)
+ran.imp.data$BsmtFinType1 = random.imp(ran.imp.data$BsmtFinType1)
+ran.imp.data$BsmtFinType2 = random.imp(ran.imp.data$BsmtFinType2)
+ran.imp.data$FireplaceQu = random.imp(ran.imp.data$FireplaceQu)
+ran.imp.data$GarageType = random.imp(ran.imp.data$GarageType)
+ran.imp.data$GarageFinish = random.imp(ran.imp.data$GarageFinish)
+ran.imp.data$GarageQual = random.imp(ran.imp.data$GarageQual)
+ran.imp.data$GarageCond = random.imp(ran.imp.data$GarageCond)
+ran.imp.data$LotFrontage = random.imp(ran.imp.data$LotFrontage)
+ran.imp.data$Electrical = random.imp(ran.imp.data$Electrical)
+
+sum(is.na(ran.imp.data))
+```
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (ran.imp.data), floor(0.80 * nrow(ran.imp.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- ran.imp.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- ran.imp.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+ran.imp.case.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+ran.imp.case.RMSE
+```
+
+4)Hotdecking
+
+```{r}
+hotdeck.data = final.data
+
+hotdeck.data = VIM::hotdeck(hotdeck.data)
+
+sum(is.na(hotdeck.data))
+```
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (hotdeck.data), floor(0.80 * nrow(hotdeck.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- hotdeck.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- hotdeck.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+hotdeck.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+hotdeck.RMSE
+```
+
+5) Regression imputation without noise
+
+```{r}
+reg.imp.data = final.data
+
+reg_imp = function(col_name, data){
+  out <- list()
+  reg.lot = cbind(data[,col_name], data[,complete.cases(t(data))])
+  colnames(reg.lot)[1] = col_name
+  col_fact = names(Filter(is.factor, reg.lot))
+  col_fact = col_fact[!col_fact %in% missing]
+  train_data = reg.lot[complete.cases(reg.lot),]
+  pred_data = ic(reg.lot)
+  for (i in col_fact){
+    train_data[,i]= droplevels(train_data[,i])
+    pred_data[,i]= droplevels(pred_data[,i])
+  }
+  for (i in col_fact){
+    if((length(levels(train_data[,i])) == length(levels(pred_data[,i]))) == F){
+      train_data = select(train_data,-i)
+      pred_data = select(pred_data, -i)
+    }else if(sum((levels((train_data[,i]))) != (levels((pred_data[,i])))) > 1){
+      train_data = select(train_data,-i)
+      pred_data = select(pred_data, -i)
+    }
+  }
+  out$train_data = train_data
+  out$pred_data = pred_data
+  out
+}
+
+```
+
+```{r}
+#Regression imputation for LotFrontage
+reg = reg_imp(col_name = "LotFrontage", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+fit = lm(LotFrontage ~ ., data = train_data)
+pred = predict(fit, newdata = pred_data)
+reg.imp.data$LotFrontage[is.na(reg.imp.data$LotFrontage)] = pred
+
+#Regression imputation for MasVnrType
+reg = reg_imp(col_name = "MasVnrType", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(MasVnrType ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$MasVnrType[is.na(reg.imp.data$MasVnrType)] = pred
+
+#Regression imputation for BsmtQual
+reg = reg_imp(col_name = "BsmtQual", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtQual ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$BsmtQual[is.na(reg.imp.data$BsmtQual)] = pred
+
+#Regression imputation for BsmtCond
+reg = reg_imp(col_name = "BsmtCond", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtCond ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$BsmtCond[is.na(reg.imp.data$BsmtCond)] = pred
+
+#Regression imputation for BsmtExposure
+reg = reg_imp(col_name = "BsmtExposure", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtExposure ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$BsmtExposure[is.na(reg.imp.data$BsmtExposure)] = pred
+
+#Regression imputation for BsmtFinType1
+reg = reg_imp(col_name = "BsmtFinType1", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtFinType1 ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$BsmtFinType1[is.na(reg.imp.data$BsmtFinType1)] = pred
+
+#Regression imputation for BsmtFinType2
+reg = reg_imp(col_name = "BsmtFinType2", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtFinType2 ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$BsmtFinType2[is.na(reg.imp.data$BsmtFinType2)] = pred
+
+#Regression imputation for Electrical
+reg = reg_imp(col_name = "Electrical", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(Electrical ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = names(which.max(pred1))
+
+
+reg.imp.data$Electrical[is.na(reg.imp.data$Electrical)] = pred
+
+#Regression imputation for FireplaceQu
+reg = reg_imp(col_name = "FireplaceQu", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(FireplaceQu ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$FireplaceQu[is.na(reg.imp.data$FireplaceQu)] = pred
+
+#Regression imputation for GarageType
+reg = reg_imp(col_name = "GarageType", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageType ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$GarageType[is.na(reg.imp.data$GarageType)] = pred
+
+#Regression imputation for GarageFinish
+reg = reg_imp(col_name = "GarageFinish", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageFinish ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$GarageFinish[is.na(reg.imp.data$GarageFinish)] = pred
+
+#Regression imputation for GarageQual
+reg = reg_imp(col_name = "GarageQual", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageQual ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$GarageQual[is.na(reg.imp.data$GarageQual)] = pred
+
+#Regression imputation for GarageCond
+reg = reg_imp(col_name = "GarageCond", data = reg.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageCond ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+pred = rep(0, nrow(pred1))
+for (i in 1:nrow(pred1)){
+  pred[i] = names(which.max(pred1[i,]))
+}
+
+reg.imp.data$GarageCond[is.na(reg.imp.data$GarageCond)] = pred
+
+
+sum(is.na(reg.imp.data)) 
+```
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (reg.imp.data), floor(0.80 * nrow(reg.imp.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- reg.imp.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- reg.imp.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+reg.imp.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+reg.imp.RMSE
+```
+
+Stochastic regression imputation
+
+```{r}
+stoc.imp.data = final.data
+
+#Regression imputation for LotFrontage
+reg = reg_imp(col_name = "LotFrontage", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+fit = lm(LotFrontage ~ ., data = train_data)
+pred = predict(fit, newdata = pred_data)
+noise = rnorm(nrow(pred_data), 0, summary(fit)$sigma)
+
+stoc.imp.data$LotFrontage[is.na(stoc.imp.data$LotFrontage)] = pred + noise
+
+#Regression imputation for MasVnrType
+reg = reg_imp(col_name = "MasVnrType", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(MasVnrType ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$MasVnrType[is.na(stoc.imp.data$MasVnrType)] = cat.imps
+
+#Regression imputation for BsmtQual
+reg = reg_imp(col_name = "BsmtQual", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtQual ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$BsmtQual[is.na(stoc.imp.data$BsmtQual)] = cat.imps
+
+#Regression imputation for BsmtCond
+reg = reg_imp(col_name = "BsmtCond", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtCond ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$BsmtCond[is.na(stoc.imp.data$BsmtCond)] = cat.imps
+
+#Regression imputation for BsmtExposure
+reg = reg_imp(col_name = "BsmtExposure", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtExposure ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$BsmtExposure[is.na(stoc.imp.data$BsmtExposure)] = cat.imps
+
+#Regression imputation for BsmtFinType1
+reg = reg_imp(col_name = "BsmtFinType1", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtFinType1 ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+stoc.imp.data$BsmtFinType1[is.na(stoc.imp.data$BsmtFinType1)] = cat.imps
+
+#Regression imputation for BsmtFinType2
+reg = reg_imp(col_name = "BsmtFinType2", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(BsmtFinType2 ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$BsmtFinType2[is.na(stoc.imp.data$BsmtFinType2)] = cat.imps
+
+#Regression imputation for Electrical
+reg = reg_imp(col_name = "Electrical", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(Electrical ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = length(pred1)
+j = sum((rmultinom(n = 1, size = 1, prob = pred1)*c(1:k)))
+cat.imps = names(pred1[5])
+
+
+stoc.imp.data$Electrical[is.na(stoc.imp.data$Electrical)] = cat.imps
+
+#Regression imputation for FireplaceQu
+reg = reg_imp(col_name = "FireplaceQu", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(FireplaceQu ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$FireplaceQu[is.na(stoc.imp.data$FireplaceQu)] = cat.imps
+
+#Regression imputation for GarageType
+reg = reg_imp(col_name = "GarageType", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageType ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$GarageType[is.na(stoc.imp.data$GarageType)] = cat.imps
+
+#Regression imputation for GarageFinish
+reg = reg_imp(col_name = "GarageFinish", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageFinish ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$GarageFinish[is.na(stoc.imp.data$GarageFinish)] = cat.imps
+
+#Regression imputation for GarageQual
+reg = reg_imp(col_name = "GarageQual", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageQual ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$GarageQual[is.na(stoc.imp.data$GarageQual)] = cat.imps
+
+#Regression imputation for GarageCond
+reg = reg_imp(col_name = "GarageCond", data = stoc.imp.data)
+train_data = reg[[1]]
+pred_data = reg[[2]]
+remove(reg)
+
+
+fit = nnet::multinom(GarageCond ~ ., data = train_data)
+pred1 = predict(fit, newdata = pred_data, type = "prob")
+k = ncol(pred1)
+cat.imps = rep(0, nrow(pred1))
+for(i in 1:nrow(pred1)){
+  j = sum((rmultinom(n = 1, size = 1, prob = pred1[i,])*c(1:k)))
+  cat.imps[i] = colnames(pred1)[j]
+}
+
+stoc.imp.data$GarageCond[is.na(stoc.imp.data$GarageCond)] = cat.imps
+
+
+sum(is.na(stoc.imp.data)) 
+```
+
+```{r}
+#Create train and test sets
+sample_n <- sample.int(nrow (stoc.imp.data), floor(0.80 * nrow(stoc.imp.data)), replace = F)
+#Create a train dataset with the sampled data
+train_data <- stoc.imp.data[sample_n, ]
+#Create a test dataset by deleting the sampled data 
+test_data <- stoc.imp.data[-sample_n, ]
+
+x <- model.matrix(LogSale ~., train_data)[,-1]
+x.test <- model.matrix(LogSale  ~., test_data)[,-1]
+y <- train_data$LogSale 
+y.test <- test_data$LogSale 
+
+#Find best lambda using cross validation
+cv.lasso <- cv.glmnet(x, y, alpha = 1)
+plot(cv.lasso)
+
+#Apply the lasso model with the best lambda
+lasso_mod <- glmnet(x, y, alpha = 1, lambda = cv.lasso$lambda.min)
+
+# Make predictions on the test data
+lasso_pred_1 = predict(lasso_mod, newx = x.test) 
+stoc.imp.RMSE = sqrt(mean((lasso_pred_1 - y.test)^2)) # Calculate test RMSE
+stoc.imp.RMSE
+```
+
+```{r}
+data.frame(Complete_case = complete.case.RMSE, Mean_imp = mean.imp.case.RMSE, Random_imp = ran.imp.case.RMSE, Hotdeck = hotdeck.RMSE, Reg_imp = reg.imp.RMSE, Stoc_imp = stoc.imp.RMSE)
+```
+
+
+Main part:
+
+Summary of results:
+
+Conclusions:
