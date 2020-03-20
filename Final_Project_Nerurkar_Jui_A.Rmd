@@ -7,6 +7,10 @@ output:
   html_document: default
 ---
 
+Introduction: 
+
+The data used for this analysis is the training data for Ames Housing Project on Kaggle. It has 1460 observations and 77 variables. 
+
 ```{r setup, include=FALSE}
 set.seed(123)
 knitr::opts_chunk$set(echo = TRUE)
